@@ -1,0 +1,24 @@
+workflow:
+  autoTrigger: true
+  branchFilters:
+    - master
+  containers:
+    - container:
+      addOns:
+        isDocker: true
+      kubernetes:
+        envFrom:
+          - secretRef:
+              name: docker-registry-creds
+      name: docker
+      image: docker:18.09.9
+      command: |
+        echo "$DOCKERHUBPASS" | docker login --username $DOCKERHUBUSER --password-stdin
+        docker build -t agnops/job-generator:latest .
+        docker tag agnops/job-generator:latest agnops/job-generator:$COMMITID
+        docker push agnops/job-generator:latest && docker push agnops/job-generator:$COMMITID
+    - container:
+      name: helm-kubectl
+      image: agnops/helm-kubectl:latest
+      command: |
+        kubectl set image deployment/aws-job-generator job-generator=agnops/job-generator:$COMMITID -n ci-cd-tools
