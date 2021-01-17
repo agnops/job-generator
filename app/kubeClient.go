@@ -61,16 +61,21 @@ func createJobObject(scmWorkflowDetails *ScmWorkflowDetails, jobId int) {
 		{Name: "COMMITID", Value: scmWorkflowDetails.CommitId},
 		{Name: "OAUTH_TOKEN", Value: scmWorkflowDetails.OAuthToken},
 	}
-	initContainer1Envs := []apiv1.EnvVar{
+	initContainerEnvs := []apiv1.EnvVar{
 		{Name: "SCM_PROVIDER", Value: scmWorkflowDetails.ScProvider},
 		{Name: "OAUTH_TOKEN", Value: scmWorkflowDetails.OAuthToken},
 		{Name: "CLONEURL", Value: scmWorkflowDetails.CloneURL},
 		{Name: "COMMITID", Value: scmWorkflowDetails.CommitId},
+		{Name: "BRANCH", Value: scmWorkflowDetails.Branch},
+		{Name: "COMMITMSG", Value: scmWorkflowDetails.CommitMsg},
+		{Name: "COMMITURL", Value: scmWorkflowDetails.CommitUrl},
+		{Name: "EMAIL", Value: scmWorkflowDetails.Email},
+		{Name: "WORKFLOW_FILE_NAME", Value: scmWorkflowDetails.Workflow.FileName},
 	}
 
 	if len(scmWorkflowDetails.Workflow.WorkflowYaml.Workflow.GlobalAddOns.RepoName) > 0 {
 		sharedEnvs = append(sharedEnvs, apiv1.EnvVar{Name: "REPO_NAME", Value: scmWorkflowDetails.Workflow.WorkflowYaml.Workflow.GlobalAddOns.RepoName})
-		initContainer1Envs = append(initContainer1Envs, apiv1.EnvVar{Name: "REPO_NAME", Value: scmWorkflowDetails.Workflow.WorkflowYaml.Workflow.GlobalAddOns.RepoName})
+		initContainerEnvs = append(initContainerEnvs, apiv1.EnvVar{Name: "REPO_NAME", Value: scmWorkflowDetails.Workflow.WorkflowYaml.Workflow.GlobalAddOns.RepoName})
 	}
 	if len(scmWorkflowDetails.Workflow.WorkflowYaml.Workflow.GlobalAddOns.DockerFilePath) > 0 {
 		sharedEnvs = append(sharedEnvs, apiv1.EnvVar{Name: "DOCKERFILE_PATH", Value: scmWorkflowDetails.Workflow.WorkflowYaml.Workflow.GlobalAddOns.DockerFilePath})
@@ -81,8 +86,8 @@ func createJobObject(scmWorkflowDetails *ScmWorkflowDetails, jobId int) {
 		dockerCloudOps += "_" + dco
 	}
 	if len(dockerCloudOps) > 0 {
-		initContainer1Envs = append(initContainer1Envs, apiv1.EnvVar{Name: "DOCKER_CLOUDOPS", Value: dockerCloudOps})
-		initContainer1Envs = append(initContainer1Envs, apiv1.EnvVar{Name: "CLOUD_WRAPPER_HOST_PORT", Value: cloudWrapperHostPort})
+		initContainerEnvs = append(initContainerEnvs, apiv1.EnvVar{Name: "DOCKER_CLOUDOPS", Value: dockerCloudOps})
+		initContainerEnvs = append(initContainerEnvs, apiv1.EnvVar{Name: "CLOUD_WRAPPER_HOST_PORT", Value: cloudWrapperHostPort})
 	}
 
 	sharedEmptyDir := apiv1.EmptyDirVolumeSource{Medium: "", SizeLimit: nil}
@@ -93,15 +98,7 @@ func createJobObject(scmWorkflowDetails *ScmWorkflowDetails, jobId int) {
 		sharedEmptyDir = apiv1.EmptyDirVolumeSource{Medium: "Memory", SizeLimit: &ramDiskSize}
 	}
 
-	initContainers := []apiv1.Container{
-		{
-			Name:  "job-helper-init",
-			Image: "agnops/job-helper",
-			ImagePullPolicy: "Always",
-			VolumeMounts: []apiv1.VolumeMount{{MountPath: "/data", Name: "containers-data"}},
-			Env: initContainer1Envs,
-		},
-	}
+	var containers []apiv1.Container
 
 	for i, container := range scmWorkflowDetails.Workflow.WorkflowYaml.Workflow.Containers {
 		volumeMounts := []apiv1.VolumeMount{{MountPath: "/data", Name: "containers-data"}}
@@ -126,9 +123,22 @@ func createJobObject(scmWorkflowDetails *ScmWorkflowDetails, jobId int) {
 			}
 		}
 
-		initContainers = append(initContainers, apiv1.Container{
+		postStart := "echo"
+
+		if i !=0 {
+			postStart = "while [ ! -f /data/container-" + strconv.Itoa(i) + " ]; do sleep 1; done"
+		}
+		containers = append(containers, apiv1.Container{
 			Name: 			 strconv.Itoa(i) + "-" + container.Name,
 			Image:           container.Image,
+			Lifecycle:		 &apiv1.Lifecycle{
+				PostStart: 	 &apiv1.Handler{
+					Exec:    &apiv1.ExecAction{Command: []string{"/bin/sh", "-c", postStart}},
+				},
+				PreStop: 	 &apiv1.Handler{
+					Exec:    &apiv1.ExecAction{Command: []string{"/bin/sh", "-c", "touch /data/container-" + strconv.Itoa(i+1)}},
+				},
+			},
 			ImagePullPolicy: "Always",
 			VolumeMounts:    volumeMounts,
 			Env:             sharedEnvs,
@@ -154,23 +164,16 @@ func createJobObject(scmWorkflowDetails *ScmWorkflowDetails, jobId int) {
 			Template: apiv1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"job_name": jobName, "agnops": "job"}},
 				Spec: apiv1.PodSpec{
-					Containers: []apiv1.Container{
+					Containers: containers,
+					InitContainers: []apiv1.Container{
 						{
-							Name:  "job-helper-finish",
-							Image: "alpine",
+							Name:  "job-helper-init",
+							Image: "agnops/job-helper",
 							ImagePullPolicy: "Always",
-							Env: []apiv1.EnvVar{
-								{Name: "BRANCH", Value: scmWorkflowDetails.Branch},
-								{Name: "COMMITMSG", Value: scmWorkflowDetails.CommitMsg},
-								{Name: "COMMITURL", Value: scmWorkflowDetails.CommitUrl},
-								{Name: "COMMITID", Value: scmWorkflowDetails.CommitId},
-								{Name: "CLONEURL", Value: scmWorkflowDetails.CloneURL},
-								{Name: "EMAIL", Value: scmWorkflowDetails.Email},
-								{Name: "WORKFLOW_FILE_NAME", Value: scmWorkflowDetails.Workflow.FileName},
-							},
+							VolumeMounts: []apiv1.VolumeMount{{MountPath: "/data", Name: "containers-data"}},
+							Env: initContainerEnvs,
 						},
 					},
-					InitContainers: initContainers,
 					RestartPolicy: "Never",
 					NodeSelector: map[string]string{"nodegroup-type": "cicd-workloads"},
 					Volumes: []apiv1.Volume{cdVolume, dockerSockVolume, dockerDaemonJsonVolume},
